@@ -14,18 +14,7 @@ Requirements, Analysis, and Open Questions
    :maxdepth: 1
 
    requirements
-   open_questions
-   test_cases
 
-
-Design Approaches
-=================
-
-.. toctree::
-   :maxdepth: 1
-
-   descriptor_table_approach
-   runtime_constructed_objects
 
 Specifications
 ==============
