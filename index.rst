@@ -22,8 +22,15 @@ Specifications
 .. toctree::
    :maxdepth: 1
 
-   descriptor_table_specification
    specification-proposal
+
+Analysis
+========
+
+.. toctree::
+   :maxdepth: 1
+
+   code-size-comparison
 
 
 
