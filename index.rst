@@ -24,13 +24,7 @@ Specifications
 
    specification-proposal
 
-Analysis
-========
 
-.. toctree::
-   :maxdepth: 1
-
-   code-size-comparison
 
 
 
