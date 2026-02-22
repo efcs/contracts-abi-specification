@@ -1,6 +1,6 @@
-=======================================
+==========================================
 Itanium C++ ABI: Contracts Specification
-=======================================
+==========================================
 
 .. contents::
    :local:
@@ -241,7 +241,7 @@ reducing each contract call site to a single pointer argument:
 
 This reduces each contract call site to:
 
-.. code-block:: asm
+.. code-block:: nasm
 
     lea     rdi, [rip + .L_static_data]
     call    contract_violation_pf_se
