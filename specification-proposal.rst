@@ -162,77 +162,41 @@ the appropriate violation handler.
    treatment similar to ``main()`` (e.g., how it is declared, found,
    and replaced).
 
-4.2 Wrapper Entrypoints
-------------------------
-
-To minimize code size at contract sites, the runtime shall provide wrapper
-entrypoints that encode common parameter combinations in their names:
-
-.. code-block:: cpp
-
-    extern "C" {
-
-    // predicate_false + enforced
-    [[noreturn]] void __cxa_contract_violation_pf_se(
-        __cxa_descriptor_table_t *static_descriptor,
-        void *static_data);
-
-    // predicate_false + observed
-    void __cxa_contract_violation_pf_so(
-        __cxa_descriptor_table_t *static_descriptor,
-        void *static_data);
-
-    // evaluation_exception + enforced
-    [[noreturn]] void __cxa_contract_violation_pe_se(
-        __cxa_descriptor_table_t *static_descriptor,
-        void *static_data);
-
-    // evaluation_exception + observed
-    void __cxa_contract_violation_pe_so(
-        __cxa_descriptor_table_t *static_descriptor,
-        void *static_data);
-
-    }
-
-**Suffix encoding:**
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 40 40
-
-   * - Suffix
-     - Detection Mode
-     - Evaluation Semantic
-   * - ``_pf_se``
-     - ``predicate_false``
-     - ``enforced``
-   * - ``_pf_so``
-     - ``predicate_false``
-     - ``observed``
-   * - ``_pe_se``
-     - ``evaluation_exception``
-     - ``enforced``
-   * - ``_pe_so``
-     - ``evaluation_exception``
-     - ``observed``
-
-Wrappers with ``_se`` (enforced semantic) are marked ``[[noreturn]]``.
-
-4.3 Compiler-Generated Wrappers
+4.2 Compiler-Generated Wrappers
 --------------------------------
 
-Compilers should emit translation-unit-local wrappers that construct the
+Compilers shall emit translation-unit-local wrappers that construct the
 versioned data object on the stack and call the generic entrypoint,
-reducing each contract call site to a single pointer argument:
+reducing each contract call site to a single pointer argument.
+
+Compilers should emit one wrapper per detection mode / evaluation semantic
+combination used in the translation unit. Wrappers for the ``enforced``
+semantic should be annotated ``[[noreturn]]``, allowing the compiler to
+omit fallthrough code at the contract site and enabling better
+optimization of the surrounding code:
 
 .. code-block:: cpp
 
-    // Compiler-generated per-TU wrapper (internal linkage)
-    static [[noreturn]] void contract_violation_pf_se(void *static_data) {
+    // Enforced semantic: marked [[noreturn]] so the compiler can omit
+    // fallthrough code at the contract site.
+    static [[noreturn]] void __cv_v1_pf_se(void *static_data) {
         contract_violation_data_v1 data = {  // exposition only
             .version = 1,
             .mode = predicate_false,
             .semantic = enforced,
+            .static_descriptor = &__descriptor_table,
+            .static_data = static_data,
+        };
+        __cxa_contract_violation_entrypoint(&data);
+    }
+
+    // Observed semantic: control returns to the contract site after the
+    // violation handler executes.
+    static void __cv_v1_pf_so(void *static_data) {
+        contract_violation_data_v1 data = {  // exposition only
+            .version = 1,
+            .mode = predicate_false,
+            .semantic = observed,
             .static_descriptor = &__descriptor_table,
             .static_data = static_data,
         };
@@ -244,14 +208,12 @@ This reduces each contract call site to:
 .. code-block:: nasm
 
     lea     rdi, [rip + .L_static_data]
-    call    contract_violation_pf_se
+    call    __cv_v1_pf_se
 
 Since translation units typically have only 1-2 descriptor tables, the
 compiler emits at most 4-8 small wrappers (one per mode/semantic
 combination per descriptor), and every contract site becomes a
-single-pointer call. If the runtime provides equivalent wrapper
-entrypoints (§4.2), the compiler may use those instead and emit zero
-TU-local wrappers.
+single-pointer call.
 
 5. Descriptor Table Specification
 ==================================
@@ -398,22 +360,6 @@ generic entrypoint by reading the versioned data and the descriptor table:
 
         if (v1->semantic == enforced)
             std::terminate();
-    }
-
-    // Runtime wrapper entrypoint implementation
-    extern "C" [[noreturn]]
-    void __cxa_contract_violation_pf_se(
-        __cxa_descriptor_table_t *static_descriptor,
-        void *static_data)
-    {
-        contract_violation_data_v1 data = {
-            .version = 1,
-            .mode = predicate_false,
-            .semantic = enforced,
-            .static_descriptor = static_descriptor,
-            .static_data = static_data,
-        };
-        __cxa_contract_violation_entrypoint(&data);
     }
 
 6.2 Compiler-Emitted Code

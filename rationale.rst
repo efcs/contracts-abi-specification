@@ -68,10 +68,10 @@ the contract site. The runtime maps back when constructing
 The "Standard Type" column in the table documents conceptual
 correspondence, not type identity.
 
-TU-Local Wrappers
-=================
+Compiler-Generated Wrappers
+===========================
 
-Compilers emit translation-unit-local wrappers (§4.3) that construct
+Compilers emit translation-unit-local wrappers (§4.2) that construct
 the versioned data object and call the generic entrypoint. This serves
 two purposes:
 
@@ -87,24 +87,31 @@ name, line number, function name) loaded at every call site. By
 deferring data setup to the TU wrapper, ``contract_assert(expr)`` can
 generate less code per site than ``assert(expr)``.
 
-Wrapper Entrypoints
-===================
+Why the Compiler Must Generate the Wrappers
+-------------------------------------------
 
-The runtime wrapper entrypoints (``__cxa_contract_violation_pf_se``
-etc.) encode detection mode and evaluation semantic in the function
-name (§4.2). These are orthogonal to the versioned data pointer:
+An earlier design had the runtime provide wrapper entrypoints (e.g.,
+``__cxa_contract_violation_pf_se``) that compilers could call instead
+of emitting TU-local wrappers. This was removed because it conflicts
+with the versioning strategy.
 
-- **Detection mode and evaluation semantic** are runtime properties of a
-  specific contract violation. They belong in the function name because
-  they determine calling convention attributes (e.g., ``[[noreturn]]``
-  for enforced semantics).
+The versioned data pointer gives the *compiler* control over which
+version of the data layout to use. If the runtime provides wrappers
+that construct the versioned struct internally, those wrappers are
+locked to whatever version the runtime was compiled with. A newer
+compiler that wants to pass v2 data cannot do so through an old
+runtime's wrapper---the wrapper would construct a v1 struct and the
+additional fields would be lost.
 
-- **The version number** describes the ABI data layout version. It has
-  nothing to do with what kind of violation occurred---it determines
-  how the runtime reads the data.
+By requiring the compiler to always construct the versioned struct
+itself, forward compatibility is preserved: a new compiler can pass
+v2 data to an old runtime's ``__cxa_contract_violation_entrypoint``,
+which reads the version byte and processes the fields it understands.
 
-When the runtime provides these wrappers, compilers can use them instead
-of emitting TU-local wrappers, reducing per-TU code size to zero.
+Wrappers for the ``enforced`` evaluation semantic are annotated
+``[[noreturn]]``, which allows the compiler to omit fallthrough code
+at the contract site and enables better optimization of the surrounding
+code.
 
 Descriptor Table Design
 =======================
