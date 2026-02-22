@@ -7,22 +7,22 @@ C++ Contracts ABI: Design Documents
 This collection contains requirements, design proposals, and specifications for
 the Itanium C++ ABI for contracts (C++26).
 
-Requirements, Analysis, and Open Questions
-==========================================
-
-.. toctree::
-   :maxdepth: 1
-
-   requirements
-
-
-Specifications
-==============
+Specification
+=============
 
 .. toctree::
    :maxdepth: 1
 
    specification-proposal
+
+Background
+==========
+
+.. toctree::
+   :maxdepth: 1
+
+   requirements
+   rationale
 
 
 

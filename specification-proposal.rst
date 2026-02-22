@@ -15,7 +15,7 @@ between compilers and runtime libraries for handling contract violations.
 
 When a contract fails at runtime, the compiler generates a call to a runtime
 entrypoint function (``__cxa_contract_violation_entrypoint``) which constructs
-a ``std::contract_violation`` object and invokes the user's violation
+a ``std::contracts::contract_violation`` object and invokes the user's violation
 handler.
 
 2. Overview
@@ -27,7 +27,7 @@ handler.
 The contract entrypoint function has the following responsibilities:
 
 * Unpack the compiler-generated contract violation data and use it to construct
-  the ``std::contract_violation`` object.
+  the ``std::contracts::contract_violation`` object.
 * Select and call the user-provided contract violation handler, if one is provided,
   or the default handler otherwise.
 * If the contract violation has an enforced semantic, terminate the program.
@@ -124,17 +124,43 @@ The runtime shall provide the following generic entrypoint function:
 .. code-block:: cpp
 
     extern "C"
-    void __cxa_contract_violation_entrypoint(
-        __cxa_descriptor_table_t *static_descriptor,
-        void *static_data,
-        __cxa_detection_mode_t mode,
-        __cxa_evaluation_semantic_t semantic,
-        __cxa_runtime_data_t *dynamic_data,
-        void *reserved
-    );
+    void __cxa_contract_violation_entrypoint(void *data);
 
-This function constructs a ``std::contract_violation`` object and invokes
+The ``data`` parameter is a pointer to an object whose layout is
+determined by a version number stored in its first byte. The layout for
+each version is described using an *exposition-only* type.
+
+**Version 1:**
+
+.. code-block:: cpp
+
+    // exposition only
+    struct contract_violation_data_v1 {
+        uint8_t                      version;  // = 1
+        __cxa_detection_mode_t       mode;
+        __cxa_evaluation_semantic_t  semantic;
+        __cxa_descriptor_table_t*    static_descriptor;
+        void*                        static_data;
+    };
+
+**Versioning rules:**
+
+* The ``version`` field shall always be the first byte of the data region.
+* New versions shall only **append** fields to the end of the structure.
+  The meaning of existing bytes shall never change when the version is
+  bumped.
+* Older runtimes that encounter an unrecognized version shall process the
+  fields they understand and ignore the rest.
+
+This function constructs a ``std::contracts::contract_violation`` object and invokes
 the appropriate violation handler.
+
+.. todo::
+
+   Define the linkage and symbol resolution mechanism for
+   ``::handle_contract_violation``. The handler may need special
+   treatment similar to ``main()`` (e.g., how it is declared, found,
+   and replaced).
 
 4.2 Wrapper Entrypoints
 ------------------------
@@ -195,17 +221,22 @@ Wrappers with ``_se`` (enforced semantic) are marked ``[[noreturn]]``.
 4.3 Compiler-Generated Wrappers
 --------------------------------
 
-Compilers should emit translation-unit-local wrappers that capture the
-descriptor table pointer, reducing each contract call site to a single
-pointer argument:
+Compilers should emit translation-unit-local wrappers that construct the
+versioned data object on the stack and call the generic entrypoint,
+reducing each contract call site to a single pointer argument:
 
 .. code-block:: cpp
 
     // Compiler-generated per-TU wrapper (internal linkage)
     static [[noreturn]] void contract_violation_pf_se(void *static_data) {
-        __cxa_contract_violation_pf_se(
-            &__descriptor_table,  // TU's descriptor table
-            static_data);
+        contract_violation_data_v1 data = {  // exposition only
+            .version = 1,
+            .mode = predicate_false,
+            .semantic = enforced,
+            .static_descriptor = &__descriptor_table,
+            .static_data = static_data,
+        };
+        __cxa_contract_violation_entrypoint(&data);
     }
 
 This reduces each contract call site to:
@@ -216,10 +247,11 @@ This reduces each contract call site to:
     call    contract_violation_pf_se
 
 Since translation units typically have only 1-2 descriptor tables, the
-compiler emits 4-8 small wrappers (one per mode/semantic combination per
-descriptor), and every contract site becomes a single-pointer call.
-
-See :doc:`code-size-comparison` for analysis of code size impact.
+compiler emits at most 4-8 small wrappers (one per mode/semantic
+combination per descriptor), and every contract site becomes a
+single-pointer call. If the runtime provides equivalent wrapper
+entrypoints (§4.2), the compiler may use those instead and emit zero
+TU-local wrappers.
 
 5. Descriptor Table Specification
 ==================================
@@ -243,16 +275,17 @@ contains corresponding offsets or pointers to extended data:
     };
 
     enum __cxa_field_type_t : uint8_t {
-        // Standard fields (no relocation needed)
-        field_summary         = 0x01,  // Default layout at offset 0
-        field_source_location = 0x11,  // __cxa_source_location inline
-        field_source_text     = 0x12,  // const char*
-        field_assertion_kind  = 0x13,  // __cxa_assertion_kind_t
+        // Standard fields: data[i].offset is a byte offset into static_data
+        // where the value of the corresponding type is stored.
+        __cxa_field_source_location = 0x11,  // __cxa_source_location
+        __cxa_field_source_text     = 0x12,  // const char*
+        __cxa_field_assertion_kind  = 0x13,  // __cxa_assertion_kind_t
 
-        // Reserved: 0x14 - 0x3F
+        // Reserved: 0x14 - 0x3F (future standard fields)
 
-        // Extended/vendor fields (may need relocation)
-        field_extended        = 0x40,
+        // Extended fields: data[i].extended_data is a pointer to
+        // vendor-specific or future extended information.
+        __cxa_field_extended        = 0x40,
     };
 
     union __cxa_descriptor_data_t {
@@ -278,7 +311,7 @@ The ``field_types[i]`` value determines how to interpret ``data[i]``:
 - If ``field_types[i] >= 0x40``: extended field, ``data[i].extended_data``
   points to extended information (requires relocation)
 
-5.3 Default Static Data Layout
+5.2 Default Static Data Layout
 -------------------------------
 
 A standard layout for the most common contract data:
@@ -303,144 +336,69 @@ A standard layout for the most common contract data:
 Implementations may omit fields by using explicit descriptor entries that
 exclude them.
 
-6. Contract Violation Accessor API
-===================================
+6. Sample Implementations
+==========================
 
-The accessor API provides a standardized interface for retrieving individual
-fields from an opaque ``std::contract_violation`` object. This API
-is used internally by the runtime and is not exposed to user code.
+The following pseudocode samples demonstrate how the specification is
+used in practice. These are illustrative, not normative.
 
-6.1 Field Enumeration
-----------------------
+6.1 Runtime Entrypoint Implementation
+---------------------------------------
 
-The accessor API uses the same field type values as the descriptor table
-(``__cxa_field_type_t``), plus additional values for fields passed as
-entrypoint parameters:
+This sample shows how a runtime library (e.g., libc++abi) implements the
+generic entrypoint by reading the versioned data and the descriptor table:
 
 .. code-block:: cpp
 
-    namespace __cxxabiv1 {
+    // User-overridable violation handler
+    void handle_contract_violation(
+        const std::contracts::contract_violation&);
 
-    // Additional field types for accessor API (not in descriptor table)
-    enum {
-        field_evaluation_semantic = 0x04,  // from entrypoint parameter
-        field_detection_mode      = 0x05,  // from entrypoint parameter
-    };
+    // Generic entrypoint implementation (in libc++abi / libsupc++)
+    extern "C"
+    void __cxa_contract_violation_entrypoint(void *data) {
+        uint8_t version = *static_cast<uint8_t*>(data);
 
-    } // namespace __cxxabiv1
+        // For version 1, interpret as contract_violation_data_v1
+        auto *v1 = static_cast<contract_violation_data_v1*>(data);
 
-6.2 Contract Violation Data Structure
---------------------------------------
+        // Walk the descriptor table to extract static fields
+        auto *desc = v1->static_descriptor;
+        auto *sdata = static_cast<const char*>(v1->static_data);
 
-The entrypoint function receives multiple pieces of contract violation data
-as separate parameters. To facilitate internal processing, a structure is
-defined to aggregate all entrypoint parameters into a single object:
+        __cxa_source_location const *loc = nullptr;
+        const char *source_text = nullptr;
+        __cxa_assertion_kind_t kind = unspecified;
 
-.. code-block:: cpp
+        for (uint8_t i = 0; i < desc->num_entries; ++i) {
+            auto offset = desc->data[i].offset;
+            switch (desc->field_types[i]) {
+            case __cxa_field_source_location:
+                loc = reinterpret_cast<const __cxa_source_location*>(
+                    sdata + offset);
+                break;
+            case __cxa_field_source_text:
+                source_text = *reinterpret_cast<const char* const*>(
+                    sdata + offset);
+                break;
+            case __cxa_field_assertion_kind:
+                kind = *reinterpret_cast<const __cxa_assertion_kind_t*>(
+                    sdata + offset);
+                break;
+            default:
+                break;  // ignore unknown fields
+            }
+        }
 
-    namespace __cxxabiv1 {
+        // Construct std::contracts::contract_violation from extracted data
+        // (construction is implementation-defined by the standard library)
+        std::contracts::contract_violation cv = /* ... */;
 
-    /**
-     * Aggregated contract violation data structure.
-     *
-     * This structure is typically constructed by the entrypoint function to
-     * package all contract violation information received from the compiler.
-     * It serves as the canonical representation of a contract violation for
-     * internal runtime use.
-     */
-    struct __cxa_contract_violation_data_t {
-        // Static descriptor and data
-        __cxa_descriptor_table_t* static_descriptor;
-        void* static_data;
+        handle_contract_violation(cv);
 
-        // Detection mode (always present)
-        __cxa_detection_mode_t mode;
-
-        // Evaluation semantic (always present)
-        __cxa_evaluation_semantic_t semantic;
-
-        // Dynamic data (may be nullptr)
-        __cxa_runtime_data_t* dynamic_data;
-
-        // Reserved for future extensions (currently unused)
-        void* reserved;
-    };
-
-    } // namespace __cxxabiv1
-
-6.3 Accessor Function
-----------------------
-
-The accessor function provides a uniform interface to retrieve individual
-fields from the aggregated contract violation data. This allows the runtime
-to query specific information without needing to understand the internal
-layout of the descriptor table and static data.
-
-.. code-block:: cpp
-
-    namespace __cxxabiv1 {
-
-    /**
-     * Retrieve a field from contract violation data.
-     *
-     * @param cv_data    Pointer to contract violation data structure
-     * @param field      Field identifier to retrieve
-     * @param output_ptr Pointer to receive the field value
-     *
-     * @return true if the field was successfully retrieved, false otherwise
-     *         (e.g., if the field is not present or not supported)
-     */
-    bool __cxa_get_contract_violation_field(
-        const __cxa_contract_violation_data_t* cv_data,
-        contract_violation_field_t field,
-        void* output_ptr
-    );
-
-    } // namespace __cxxabiv1
-
-**Implementation Notes:**
-
-* The function shall interpret the ``static_descriptor`` and
-  ``static_data`` fields to locate statically-known contract
-  information such as source location, source text, and assertion kind.
-* The function shall return values from ``mode`` and
-  ``semantic`` fields directly when those fields are requested.
-* The function shall interpret ``dynamic_data`` when present to
-  extract runtime-dependent information (reserved for future use).
-* The function shall return ``false`` if a requested field is not
-  present in the contract violation data.
-
-6.4 Field Type Specifications
-------------------------------
-
-The ``output_ptr`` parameter must point to a variable of the
-appropriate type for the requested field:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 40 60
-
-   * - Field
-     - Output Type
-   * - ``field_source_location``
-     - ``const __cxa_source_location*``
-   * - ``field_source_text``
-     - ``const char**``
-   * - ``field_assertion_kind``
-     - ``__cxa_assertion_kind_t*``
-   * - ``field_evaluation_semantic``
-     - ``__cxa_evaluation_semantic_t*``
-   * - ``field_detection_mode``
-     - ``__cxa_detection_mode_t*``
-
-6.5 Usage Example
-------------------
-
-.. code-block:: cpp
-
-    // User-overridable violation handler (weak symbol in standard library)
-    [[noreturn]] void handle_contract_violation(
-        const std::contract_violation&);
+        if (v1->semantic == enforced)
+            std::terminate();
+    }
 
     // Runtime wrapper entrypoint implementation
     extern "C" [[noreturn]]
@@ -448,17 +406,72 @@ appropriate type for the requested field:
         __cxa_descriptor_table_t *static_descriptor,
         void *static_data)
     {
-        __cxa_contract_violation_data_t cv_data = {
-            .static_descriptor = static_descriptor,
-            .static_data = static_data,
+        contract_violation_data_v1 data = {
+            .version = 1,
             .mode = predicate_false,
             .semantic = enforced,
-            .dynamic_data = nullptr,
-            .reserved = nullptr
+            .static_descriptor = static_descriptor,
+            .static_data = static_data,
         };
+        __cxa_contract_violation_entrypoint(&data);
+    }
 
-        // Construct std::contract_violation and invoke handler
-        std::contract_violation cv(&cv_data);
-        handle_contract_violation(cv);
+6.2 Compiler-Emitted Code
+---------------------------
+
+This sample shows pseudocode equivalent to what a compiler emits for a
+translation unit containing contract assertions:
+
+.. code-block:: cpp
+
+    // --- Compiler-emitted per-TU data (in .rodata) ---
+
+    static const __cxa_descriptor_table_t __desc = {
+        .version = 1,
+        .vendor_id = VENDOR_GENERIC,
+        .num_entries = 3,
+        .field_types = {
+            __cxa_field_source_location,
+            __cxa_field_source_text,
+            __cxa_field_assertion_kind,
+        },
+        // data[] array follows with corresponding offsets
+    };
+
+    // --- Compiler-emitted per-TU wrappers (internal linkage) ---
+    // Name encodes the data layout version (v1) and the mode/semantic.
+
+    static [[noreturn]] void __cv_v1_pf_se(void *static_data) {
+        contract_violation_data_v1 data = {
+            .version = 1,
+            .mode = predicate_false,
+            .semantic = enforced,
+            .static_descriptor = &__desc,
+            .static_data = static_data,
+        };
+        __cxa_contract_violation_entrypoint(&data);
+    }
+
+    // --- Per-contract-site static data (in .rodata) ---
+
+    // For: int foo(int x) pre(x > 0) { ... }
+    static const struct {
+        __cxa_source_location loc;
+        const char *text;
+        __cxa_assertion_kind_t kind;
+    } __contract_data_foo_pre = {
+        .loc = { "foo.cpp", "foo", 42, 0 },
+        .text = "x > 0",
+        .kind = pre,
+    };
+
+    // --- At the contract site ---
+
+    int foo(int x) {
+        if (!(x > 0)) {
+            __cv_v1_pf_se((void*)&__contract_data_foo_pre);
+            __builtin_unreachable();
+        }
+        // ... function body ...
     }
 
