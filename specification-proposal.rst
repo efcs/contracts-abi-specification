@@ -304,6 +304,10 @@ exclude them.
 The following pseudocode samples demonstrate how the specification is
 used in practice. These are illustrative, not normative.
 
+A compilable example exercising the full ABI flow (descriptor table,
+compiler-emitted wrappers, runtime entrypoint, and violation handler)
+is available in the `example/ directory <https://github.com/efcs/contracts-abi-specification/tree/main/example>`_.
+
 6.1 Runtime Entrypoint Implementation
 ---------------------------------------
 
