@@ -11,12 +11,7 @@ Specification Answers to Open Questions
 Purpose
 *******
 
-This document contains answers to the questions in :ref:`open_questions` based on a comprehensive search through the C++ Contracts specification (p2900r14).
-
-Source Material
-***************
-
-The answers below are extracted from p2900r14, which has been split into 97 text chunks in the ``contract-specification/`` directory.
+What does p2900r14 say about the questions that matter for the ABI?
 
 Question 1: User-Provided Violation Handlers
 *********************************************
@@ -358,7 +353,4 @@ The specification deliberately leaves many ABI details to implementations, inclu
       - Would require additional ABI surface
 
 .. seealso::
-   - :ref:`open_questions` - The original open questions document
    - :ref:`requirements` - Design Requirements
-   - :ref:`descriptor_table_approach` - Descriptor Table approach
-   - :ref:`runtime_constructed_objects` - Runtime-Constructed Thunks approach
