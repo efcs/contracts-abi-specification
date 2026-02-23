@@ -1,0 +1,46 @@
+name: Build and Run Example
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Build example
+        run: make -C example
+
+      - name: Run example and verify behavior
+        run: |
+          # Run the binary directly (not via 'make run' which swallows the
+          # exit code with || true) so we can verify both stderr and the
+          # exit code.
+          set +e
+          ./example/contracts_example 2>stderr.log
+          exit_code=$?
+          set -e
+
+          echo "--- stderr output ---"
+          cat stderr.log
+          echo "--- exit code: $exit_code ---"
+
+          # Verify stderr contains contract violation messages
+          if ! grep -q "contract violation" stderr.log; then
+            echo "FAIL: expected 'contract violation' in stderr output"
+            exit 1
+          fi
+
+          # Verify non-zero exit code (134 = SIGABRT from enforced precondition)
+          if [ "$exit_code" -eq 0 ]; then
+            echo "FAIL: expected non-zero exit code, got 0"
+            exit 1
+          fi
+
+          echo "PASS: contract violations printed to stderr, exit code $exit_code"

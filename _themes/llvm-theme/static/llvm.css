@@ -1,0 +1,125 @@
+/* LLVM Documentation Theme CSS */
+
+/* Import the basic theme as base */
+@import url("basic.css");
+
+/* Override with LLVM-specific styling */
+body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    background-color: #f9f9f9;
+    color: #333;
+    margin: 0;
+    padding: 0;
+}
+
+div.document {
+    background-color: white;
+    text-align: left;
+    background-image: url(contents.png);
+    background-repeat: repeat-x;
+}
+
+div.body {
+    max-width: none;
+    margin: 0 230px 0 240px;
+    padding: 0 20px 30px 20px;
+    background-color: white;
+}
+
+div.bodywrapper {
+    margin: 0 0 0 240px;
+}
+
+div.sidebar {
+    width: 220px;
+    font-size: 90%;
+    margin-left: -100%;
+    float: left;
+}
+
+/* Headers with LLVM styling */
+div.body h1,
+div.body h2,
+div.body h3,
+div.body h4,
+div.body h5,
+div.body h6 {
+    font-family: "Trebuchet MS", sans-serif;
+    background-color: #f2f2f2;
+    font-weight: bold;
+    color: #20435c;
+    border: 1px solid #ccc;
+    margin: 20px -20px 10px -20px;
+    padding: 5px 20px;
+    text-shadow: 0px 1px 0 white;
+    border-radius: 5px;
+}
+
+div.body h1 { 
+    margin-top: 0; 
+    font-size: 200%; 
+    background-color: #6AAEDB;
+    color: white;
+    text-shadow: 0px 1px 0 #1A446D;
+    border: 1px solid #1A446D;
+}
+
+div.body h2 { font-size: 160%; }
+div.body h3 { font-size: 140%; }
+
+/* Code blocks */
+div.highlight {
+    background-color: #f8f8f8;
+}
+
+pre {
+    font-family: "Consolas", "Monaco", "Courier New", monospace;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+/* Links */
+a {
+    color: #355F7C;
+    text-decoration: none;
+}
+
+a:visited {
+    color: #355F7C;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+/* Navigation */
+div.related {
+    background-color: #6AAEDB;
+    color: white;
+    width: 100%;
+    line-height: 30px;
+    font-size: 90%;
+    text-align: center;
+}
+
+div.related ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+div.related li {
+    display: inline;
+    margin: 0;
+}
+
+div.related a {
+    color: white;
+    font-weight: bold;
+    text-decoration: none;
+}
+
+div.related a:hover {
+    text-decoration: underline;
+}
