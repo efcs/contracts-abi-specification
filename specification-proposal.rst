@@ -92,6 +92,14 @@ The ABI is designed to be:
 3.3 Enumerations
 -----------------
 
+Each enumeration has an underlying type of ``uint8_t`` and fixed
+enumerator values independent of any values used by the standard
+library's corresponding types. Value ``0x00`` is reserved for
+the unspecified case in each enumeration.
+
+3.3.1 ``__cxa_assertion_kind_t``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 .. code-block:: cpp
 
     enum __cxa_assertion_kind_t : uint8_t {
@@ -101,17 +109,38 @@ The ABI is designed to be:
         contract_assert  = 0x03,
     };
 
+Identifies the kind of contract assertion: precondition, postcondition,
+or ``contract_assert``.
+
+3.3.2 ``__cxa_evaluation_semantic_t``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: cpp
+
     enum __cxa_evaluation_semantic_t : uint8_t {
         unspecified = 0x00,
         enforced    = 0x01,
         observed    = 0x02,
     };
 
+Identifies the evaluation semantic of the contract assertion.
+``enforced`` indicates the program shall terminate after the violation
+handler returns. ``observed`` indicates execution continues.
+
+3.3.3 ``__cxa_detection_mode_t``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: cpp
+
     enum __cxa_detection_mode_t : uint8_t {
         unspecified           = 0x00,
         predicate_false       = 0x01,
         evaluation_exception  = 0x02,
     };
+
+Identifies how the violation was detected. ``predicate_false`` indicates
+the contract predicate evaluated to ``false``. ``evaluation_exception``
+indicates the predicate exited via an exception.
 
 4. Entrypoint Functions
 ========================
@@ -218,16 +247,19 @@ single-pointer call.
 5. Descriptor Table Specification
 ==================================
 
-5.1 Descriptor Table Structure
--------------------------------
+5.1 Descriptor Table Types
+---------------------------
 
 The descriptor table uses parallel arrays to avoid relocations. The
 ``field_types`` array contains field identifiers, and the ``data`` array
-contains corresponding offsets or pointers to extended data:
+contains corresponding offsets or pointers to extended data.
+
+All types below are declared in ``namespace __cxxabiv1``.
+
+5.1.1 ``__cxa_vendor_id_t``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: cpp
-
-    namespace __cxxabiv1 {
 
     enum __cxa_vendor_id_t : uint8_t {
         VENDOR_GENERIC = 0x00,
@@ -236,24 +268,60 @@ contains corresponding offsets or pointers to extended data:
         VENDOR_MSVC    = 0x03,
     };
 
+Identifies the vendor that produced the descriptor table. Value ``0x00``
+indicates a generic table conforming to this specification. Conforming
+runtimes shall process standard fields normally regardless of the vendor ID.
+
+5.1.2 ``__cxa_field_type_t``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: cpp
+
     enum __cxa_field_type_t : uint8_t {
-        // Standard fields: data[i].offset is a byte offset into static_data
-        // where the value of the corresponding type is stored.
-        __cxa_field_source_location = 0x11,  // __cxa_source_location
-        __cxa_field_source_text     = 0x12,  // const char*
-        __cxa_field_assertion_kind  = 0x13,  // __cxa_assertion_kind_t
+        __cxa_field_source_location = 0x11,
+        __cxa_field_source_text     = 0x12,
+        __cxa_field_assertion_kind  = 0x13,
 
         // Reserved: 0x14 - 0x3F (future standard fields)
 
-        // Extended fields: data[i].extended_data is a pointer to
-        // vendor-specific or future extended information.
         __cxa_field_extended        = 0x40,
     };
 
+Each enumerator identifies a field in the per-contract-site static data:
+
+- ``__cxa_field_source_location`` (``0x11``): a ``__cxa_source_location``
+  stored inline.
+- ``__cxa_field_source_text`` (``0x12``): a ``const char*`` pointing to a
+  null-terminated string containing the source text of the contract predicate.
+- ``__cxa_field_assertion_kind`` (``0x13``): a ``__cxa_assertion_kind_t``
+  value.
+- ``__cxa_field_extended`` (``0x40``): extended field; see interpretation
+  rules below.
+
+Values below ``0x40`` are standard fields. Values ``0x40`` and above are
+extended fields. Values ``0x14`` through ``0x3F`` are reserved for future
+standard fields.
+
+5.1.3 ``__cxa_descriptor_data_t``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: cpp
+
     union __cxa_descriptor_data_t {
-        uintptr_t offset;        // For standard fields: byte offset into static_data
-        void* extended_data;     // For extended fields: pointer to extended info
+        uintptr_t offset;
+        void* extended_data;
     };
+
+For standard fields (``field_types[i] < 0x40``), ``data[i].offset`` is
+the byte offset into ``static_data`` where the value is stored.
+
+For extended fields (``field_types[i] >= 0x40``), ``data[i].extended_data``
+is a pointer to extended information (requires relocation).
+
+5.1.4 ``__cxa_descriptor_table_t``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: cpp
 
     struct __cxa_descriptor_table_t {
         uint8_t version   : 4;
@@ -264,14 +332,21 @@ contains corresponding offsets or pointers to extended data:
         // Followed by __cxa_descriptor_data_t data[num_entries]
     };
 
-    } // namespace __cxxabiv1
+The ``field_types`` member is a flexible array of ``num_entries`` bytes,
+followed by padding (if necessary) to achieve the alignment required by
+``__cxa_descriptor_data_t``, followed by ``num_entries`` elements of type
+``__cxa_descriptor_data_t``.
 
-The ``field_types[i]`` value determines how to interpret ``data[i]``:
+The ``version`` field identifies the descriptor table format version. This
+specification defines version 1.
 
-- If ``field_types[i] < 0x40``: standard field, ``data[i].offset`` is the
-  byte offset into ``static_data``
-- If ``field_types[i] >= 0x40``: extended field, ``data[i].extended_data``
-  points to extended information (requires relocation)
+The descriptor table shall be emitted with static storage duration in a
+read-only data section.
+
+The runtime shall iterate the descriptor table and ignore any
+``field_types`` values it does not recognize. Fields may appear in any
+order. A field type shall not appear more than once in a single descriptor
+table.
 
 5.2 Default Static Data Layout
 -------------------------------
