@@ -45,54 +45,13 @@ Generated assembly (x86-64):
 
 **Call site size: ~36 bytes**
 
-C++26 Contracts (Generic Entrypoint)
-------------------------------------
+C++26 Contracts (ABI Entry Point)
+-----------------------------------
 
-Using the 6-parameter generic entrypoint:
-
-.. code-block:: asm
-
-    ; Condition check
-    cmp     edi, 0                        ; 3 bytes
-    jg      .L_ok                         ; 2 bytes
-
-    ; Violation path (6 arguments)
-    lea     rdi, [rip + .L_descriptor]    ; 7 bytes
-    lea     rsi, [rip + .L_static_data]   ; 7 bytes
-    mov     edx, 0x01                     ; 5 bytes - mode
-    mov     ecx, 0x01                     ; 5 bytes - semantic
-    xor     r8d, r8d                      ; 3 bytes - dynamic_data
-    xor     r9d, r9d                      ; 3 bytes - reserved
-    call    __cxa_contract_violation_entrypoint  ; 5 bytes
-
-    .L_ok:
-
-**Call site size: ~40 bytes**
-
-C++26 Contracts (Runtime Wrapper)
----------------------------------
-
-Using the 2-parameter runtime wrapper:
-
-.. code-block:: asm
-
-    ; Condition check
-    cmp     edi, 0                        ; 3 bytes
-    jg      .L_ok                         ; 2 bytes
-
-    ; Violation path (2 arguments)
-    lea     rdi, [rip + .L_descriptor]    ; 7 bytes
-    lea     rsi, [rip + .L_static_data]   ; 7 bytes
-    call    __cxa_contract_violation_pf_se  ; 5 bytes
-
-    .L_ok:
-
-**Call site size: ~24 bytes**
-
-C++26 Contracts (Compiler-Generated Wrapper)
---------------------------------------------
-
-Using single-pointer compiler-generated wrapper:
+Each call site passes a single pointer to a ``.rodata`` data block and
+calls the appropriate entry point directly.  No per-TU wrappers are
+needed---the entry point name encodes the assertion kind, evaluation
+semantic, and detection mode:
 
 .. code-block:: asm
 
@@ -101,12 +60,14 @@ Using single-pointer compiler-generated wrapper:
     jg      .L_ok                         ; 2 bytes
 
     ; Violation path (1 argument)
-    lea     rdi, [rip + .L_static_data]   ; 7 bytes
-    call    contract_violation_pf_se      ; 5 bytes
+    lea     rdi, [rip + .L_data_block]    ; 7 bytes
+    call    __cxa_contract_violation_pre_enforce_pf  ; 5 bytes
 
     .L_ok:
 
 **Call site size: ~17 bytes**
+
+This is **53% smaller** than ``assert()`` per call site.
 
 Summary
 -------
@@ -121,13 +82,7 @@ Summary
    * - ``assert()``
      - 36 bytes
      - baseline
-   * - Contracts (generic, 6 params)
-     - 40 bytes
-     - +11%
-   * - Contracts (runtime wrapper, 2 params)
-     - 24 bytes
-     - **-33%**
-   * - Contracts (compiler wrapper, 1 param)
+   * - Contracts (ABI entry point, 1 argument)
      - 17 bytes
      - **-53%**
 
@@ -161,7 +116,8 @@ Each assert site requires string literals:
 Contracts
 ---------
 
-Each contract site requires a static_data blob:
+Each contract site requires a ``__cxa_contract_data_block`` in
+``.rodata``:
 
 .. list-table::
    :header-rows: 1
@@ -170,14 +126,17 @@ Each contract site requires a static_data blob:
    * - Data
      - Size (LP64)
      - Shared?
+   * - Block header (descriptor + next pointers)
+     - 16 bytes
+     - No
    * - ``__cxa_source_location`` (inline)
      - 24 bytes
      - No
-   * - Source text pointer
+   * - Comment pointer (predicate text)
      - 8 bytes
      - No
-   * - Assertion kind
-     - 1 byte
+   * - Message pointer (P3099 diagnostic)
+     - 8 bytes
      - No
    * - File name string
      - ~30 bytes
@@ -189,10 +148,11 @@ Each contract site requires a static_data blob:
      - ~20 bytes
      - No
 
-**Per-site static data: ~33 bytes (struct) + ~20 bytes (source text)**
+**Per-site static data: ~56 bytes (struct) + ~20 bytes (source text)**
 
-The descriptor table is shared across all contracts in a translation unit,
-adding negligible overhead (~50-100 bytes per TU).
+The descriptor table is shared across all data blocks of the same
+variant within a translation unit, adding negligible overhead (~64-128
+bytes per TU for 1-4 descriptor variants).
 
 Program-Wide Impact
 ===================
@@ -205,45 +165,50 @@ For a program with 10,000 contract sites:
 
    * - Approach
      - Call Sites
-     - Wrappers
+     - Overhead
      - Total Code
    * - assert()
      - 360 KB
      - 0
      - 360 KB
-   * - Contracts (generic)
-     - 400 KB
-     - 0
-     - 400 KB
-   * - Contracts (runtime wrapper)
-     - 240 KB
-     - ~0.1 KB
-     - 240 KB
-   * - Contracts (compiler wrapper)
+   * - Contracts (ABI entry point)
      - 170 KB
-     - ~0.5 KB
+     - ~0.1 KB (descriptors)
      - **170 KB**
 
-Using compiler-generated wrappers, contracts achieve **53% smaller code**
-than traditional assert().
+Using ABI-level entry points, contracts achieve **53% smaller code**
+than traditional ``assert()``.
 
 Additional Benefits
 ===================
 
-Beyond code size, contracts provide:
+Beyond code size, the ABI provides:
 
 ``[[noreturn]]`` Optimization
-    Enforced contract wrappers are marked ``[[noreturn]]``, allowing the
-    compiler to eliminate dead code after violation calls.
+    Enforce entry points are ``[[noreturn]]``, allowing the compiler to
+    eliminate dead code after the call.  This is a declared function
+    attribute, not a TU-local annotation---the optimizer gets the
+    guarantee without alias analysis.
+
+``noexcept`` Optimization
+    Entry points called in noexcept contexts use the ``_noexcept``
+    variant, letting the compiler omit exception handling bookkeeping
+    (landing pads, EH tables) around contract checks.
 
 Unified Handler
     All contract violations go through a single customizable handler,
     unlike assert() which always calls ``abort()``.
 
 Rich Metadata
-    Contracts carry structured metadata (assertion kind, evaluation semantic,
-    detection mode) enabling sophisticated violation handling.
+    Contracts carry structured metadata (assertion kind, evaluation
+    semantic, detection mode, P3099 message, P3400 local handlers)
+    enabling sophisticated violation handling.
 
 Deduplication
-    Descriptor tables and string literals can be deduplicated by the linker,
-    further reducing binary size.
+    Descriptor tables and string literals can be deduplicated by the
+    linker, further reducing binary size.
+
+Zero Wrapper Overhead
+    No per-TU wrapper functions are emitted.  The 34 entry points
+    are provided by the ABI runtime once, shared by all translation
+    units.

@@ -1,30 +1,28 @@
-// contracts_runtime.cpp - Example runtime entrypoint implementation
+// contracts_runtime.cpp - Reference implementation of the ABI runtime.
 //
-// Implements __cxa_contract_violation_entrypoint and a sample
-// std::contracts::contract_violation. In a real implementation:
-//   - The entrypoint lives in the C++ runtime (libc++abi / libsupc++)
-//   - contract_violation is defined by the standard library (libc++ / libstdc++)
+// Implements the chain-walking field lookup, override block mechanism,
+// all 34 entry points, and a sample std::contracts::contract_violation.
+//
+// In a production implementation:
+//   - __cxa_find_field and entry points live in the C++ runtime
+//     (libc++abi / libsupc++)
+//   - contract_violation is defined by the standard library
+//     (libc++ / libstdc++) with the same chain-pointer layout
 
 #include "contracts_abi.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
 
+using namespace __cxxabiv1;
+
 // =====================================================================
-// std::source_location (matching libc++ layout)
-//
-// The real libc++ source_location stores a pointer to an __impl struct
-// whose layout is { const char*, const char*, unsigned, unsigned } —
-// the same layout as __cxa_source_location. The runtime constructs a
-// source_location by pointing it at the __cxa_source_location in the
-// compiler-emitted static data via __create_from_pointer.
+// std::source_location (matching libc++/libstdc++ layout)
 // =====================================================================
 
 namespace std {
 
 class source_location {
-    // The names __impl, _M_file_name, _M_function_name, _M_line, and
-    // _M_column are hard-coded in the compiler and must not be changed.
     struct __impl {
         const char* _M_file_name;
         const char* _M_function_name;
@@ -35,12 +33,10 @@ class source_location {
     const __impl* __ptr_ = nullptr;
 
 public:
-    // Used by the runtime to create a source_location from a pointer to
-    // a layout-compatible struct (i.e. __cxa_source_location).
-    static source_location __create_from_pointer(const void* __ptr) {
-        source_location __loc;
-        __loc.__ptr_ = static_cast<const __impl*>(__ptr);
-        return __loc;
+    static source_location __create_from_pointer(const void* p) {
+        source_location loc;
+        loc.__ptr_ = static_cast<const __impl*>(p);
+        return loc;
     }
 
     constexpr source_location() noexcept = default;
@@ -62,69 +58,88 @@ public:
 } // namespace std
 
 // =====================================================================
-// Sample std::contracts implementation (normally in the standard library)
+// std::contracts types
 // =====================================================================
 
 namespace std { namespace contracts {
 
-// p2900 §3.7.2 enumerations
-// Note: the standard uses different names/values than the ABI wire
-// format. The runtime translates between them.
-enum class assertion_kind {
-    pre    = 0,
-    post   = 1,
-    assert = 2,
-};
+enum class assertion_kind { pre, post, assert_ };
+enum class evaluation_semantic { ignore, observe, enforce, quick_enforce };
+enum class detection_mode { predicate_false, evaluation_exception };
 
-enum class evaluation_semantic {
-    ignore        = 0,
-    observe       = 1,
-    enforce       = 2,
-    quick_enforce = 3,
-};
-
-enum class detection_mode {
-    predicate_false      = 0,
-    evaluation_exception = 1,
-};
-
-// p2900 §3.7.3 - The class std::contracts::contract_violation
-// Cannot be constructed, copied, moved, or mutated by the user.
+// contract_violation is a thin wrapper around the chain pointer.
+// All accessors walk the chain to find field values.
 class contract_violation {
-    // Implementation-defined internal representation.
-    // The ABI doesn't specify this layout; each standard library chooses
-    // its own. This is one possible implementation.
-    std::source_location   loc_;
-    const char*            comment_;
-    assertion_kind         kind_;
-    detection_mode         detection_mode_;
-    evaluation_semantic    semantic_;
+    const __cxa_contract_data_block* __chain_;
 
-    // Only the runtime can construct these
-    friend void ::__cxa_contract_violation_entrypoint(void*);
-
-    contract_violation() = default;
+    friend void __cxa_cv_dispatch(const __cxa_contract_data_block*,
+                                  uint8_t, bool);
 
 public:
+    explicit contract_violation(const __cxa_contract_data_block* chain)
+        : __chain_(chain) {}
+
     contract_violation(const contract_violation&) = delete;
     contract_violation& operator=(const contract_violation&) = delete;
 
-    const char* comment() const noexcept { return comment_ ? comment_ : ""; }
+    assertion_kind kind() const noexcept {
+        auto v = __cxa_find_field_value<uint8_t>(
+            __chain_, CXA_FIELD_ASSERTION_KIND, 0);
+        switch (v) {
+        case CXA_AK_PRE:  return assertion_kind::pre;
+        case CXA_AK_POST: return assertion_kind::post;
+        default:           return assertion_kind::assert_;
+        }
+    }
 
-    contracts::detection_mode detection_mode() const noexcept {
-        return detection_mode_;
+    evaluation_semantic semantic() const noexcept {
+        auto v = __cxa_find_field_value<uint8_t>(
+            __chain_, CXA_FIELD_EVALUATION_SEMANTIC, 0);
+        switch (v) {
+        case CXA_ES_IGNORE:        return evaluation_semantic::ignore;
+        case CXA_ES_OBSERVE:       return evaluation_semantic::observe;
+        case CXA_ES_ENFORCE:       return evaluation_semantic::enforce;
+        case CXA_ES_QUICK_ENFORCE: return evaluation_semantic::quick_enforce;
+        default:                    return evaluation_semantic::enforce;
+        }
+    }
+
+    detection_mode detection_mode_() const noexcept {
+        auto v = __cxa_find_field_value<uint8_t>(
+            __chain_, CXA_FIELD_DETECTION_MODE, 0);
+        switch (v) {
+        case CXA_DM_EVALUATION_EXCEPTION:
+            return detection_mode::evaluation_exception;
+        default:
+            return detection_mode::predicate_false;
+        }
+    }
+
+    const char* comment() const noexcept {
+        auto p = __cxa_find_field_ptr<const char*>(
+            __chain_, CXA_FIELD_COMMENT);
+        return p ? *p : "";
+    }
+
+    const char* message() const noexcept {
+        auto p = __cxa_find_field_ptr<const char*>(
+            __chain_, CXA_FIELD_MESSAGE);
+        return p ? *p : "";
+    }
+
+    std::source_location location() const noexcept {
+        auto p = __cxa_find_field_ptr<__cxa_source_location>(
+            __chain_, CXA_FIELD_SOURCE_LOCATION);
+        if (p)
+            return std::source_location::__create_from_pointer(p);
+        return {};
     }
 
     bool is_terminating() const noexcept {
-        return semantic_ == evaluation_semantic::enforce
-            || semantic_ == evaluation_semantic::quick_enforce;
+        auto sem = __cxa_find_field_value<uint8_t>(
+            __chain_, CXA_FIELD_EVALUATION_SEMANTIC, 0);
+        return sem == CXA_ES_ENFORCE || sem == CXA_ES_QUICK_ENFORCE;
     }
-
-    assertion_kind kind() const noexcept { return kind_; }
-
-    std::source_location location() const noexcept { return loc_; }
-
-    evaluation_semantic semantic() const noexcept { return semantic_; }
 };
 
 void invoke_default_contract_violation_handler(const contract_violation&);
@@ -132,124 +147,261 @@ void invoke_default_contract_violation_handler(const contract_violation&);
 }} // namespace std::contracts
 
 // =====================================================================
-// Violation handler (user-replaceable via weak symbol)
+// Chain-walking field lookup (specification S5.4)
 // =====================================================================
 
-extern "C" __attribute__((weak))
-void handle_contract_violation(const std::contracts::contract_violation& cv) {
-    const char *kind_str = "unknown";
+namespace __cxxabiv1 {
+
+const void*
+__cxa_find_field(const __cxa_contract_data_block* chain,
+                 const uint8_t* ids,
+                 uint8_t num_ids)
+{
+    for (auto* block = chain; block; block = block->next)
+    {
+        auto* desc = block->descriptor;
+        if (!desc)
+            continue;
+        auto* fdata = desc->data();
+        for (uint8_t i = 0; i < desc->num_entries; ++i)
+            for (uint8_t j = 0; j < num_ids; ++j)
+                if (desc->field_ids[i] == ids[j])
+                {
+                    if (desc->field_ids[i] >= CXA_FIELD_EXTENDED)
+                        return fdata[i].pointer;
+                    auto off = fdata[i].offset;
+                    return reinterpret_cast<const char*>(block) + off;
+                }
+    }
+    return nullptr;
+}
+
+} // namespace __cxxabiv1
+
+// =====================================================================
+// Override descriptor table (specification S4.3)
+// =====================================================================
+
+namespace {
+
+// Contiguous descriptor: header, field_ids, padding, data.
+struct __override_desc_t
+{
+    uint8_t header;
+    uint8_t num_entries;
+    uint8_t field_ids[3];
+    uint8_t padding[3];
+    __cxa_descriptor_data_t data[3];
+};
+
+// The override data block layout:
+//   offset  0: descriptor pointer  (8 bytes on 64-bit)
+//   offset  8: next pointer        (8 bytes)
+//   offset 16: kind (uint8_t)
+//   offset 17: semantic (uint8_t)
+//   offset 18: mode (uint8_t)
+static constexpr __override_desc_t __override_desc = {
+    (1u << 4) | CXA_VENDOR_GENERIC,  // version=1, vendor=GENERIC
+    3,
+    { CXA_FIELD_ASSERTION_KIND, CXA_FIELD_EVALUATION_SEMANTIC,
+      CXA_FIELD_DETECTION_MODE },
+    { 0, 0, 0 },
+    {
+        { 2 * sizeof(void*) },      // kind at offset 16
+        { 2 * sizeof(void*) + 1 },  // semantic at offset 17
+        { 2 * sizeof(void*) + 2 },  // mode at offset 18
+    }
+};
+
+struct __override_block_t
+{
+    const __cxa_descriptor_table_t*  descriptor;
+    const __cxa_contract_data_block* next;
+    uint8_t kind;
+    uint8_t semantic;
+    uint8_t mode;
+};
+
+} // anonymous namespace
+
+// =====================================================================
+// Global handler (weak symbol, user-replaceable)
+// =====================================================================
+
+__attribute__((weak))
+void handle_contract_violation(
+    const std::contracts::contract_violation& cv)
+{
+    const char* kind_str = "unknown";
     switch (cv.kind()) {
-    case std::contracts::assertion_kind::pre:    kind_str = "precondition"; break;
-    case std::contracts::assertion_kind::post:   kind_str = "postcondition"; break;
-    case std::contracts::assertion_kind::assert: kind_str = "assertion"; break;
+    case std::contracts::assertion_kind::pre:     kind_str = "precondition"; break;
+    case std::contracts::assertion_kind::post:    kind_str = "postcondition"; break;
+    case std::contracts::assertion_kind::assert_: kind_str = "assertion"; break;
     }
 
-    const char *semantic_str = "unknown";
+    const char* semantic_str = "unknown";
     switch (cv.semantic()) {
-    case std::contracts::evaluation_semantic::observe: semantic_str = "observe"; break;
-    case std::contracts::evaluation_semantic::enforce: semantic_str = "enforce"; break;
+    case std::contracts::evaluation_semantic::observe:       semantic_str = "observe"; break;
+    case std::contracts::evaluation_semantic::enforce:       semantic_str = "enforce"; break;
     case std::contracts::evaluation_semantic::quick_enforce: semantic_str = "quick_enforce"; break;
-    case std::contracts::evaluation_semantic::ignore: semantic_str = "ignore"; break;
+    case std::contracts::evaluation_semantic::ignore:        semantic_str = "ignore"; break;
     }
 
     auto loc = cv.location();
-    fprintf(stderr, "contract violation: %s '%s' failed [%s]\n",
-            kind_str, cv.comment(), semantic_str);
-    fprintf(stderr, "  at %s:%u in %s\n",
-            loc.file_name(), loc.line(), loc.function_name());
+    std::fprintf(stderr,
+        "contract violation: %s '%s' failed [%s]\n"
+        "  at %s:%u in %s\n",
+        kind_str, cv.comment(), semantic_str,
+        loc.file_name(), loc.line(), loc.function_name());
 }
+
+namespace std { namespace contracts {
+
+void invoke_default_contract_violation_handler(
+    const contract_violation& cv)
+{
+    ::handle_contract_violation(cv);
+}
+
+}} // namespace std::contracts
 
 // =====================================================================
-// §4.1 Generic Entrypoint Implementation
+// Core dispatch (specification S6.1)
 // =====================================================================
 
-// Translation helpers: ABI wire format -> standard library enums.
-// The ABI defines fixed uint8_t values for cross-compiler stability;
-// the standard library may use different underlying values internally.
-static std::contracts::assertion_kind
-translate_kind(__cxxabiv1::__cxa_assertion_kind_t abi_kind) {
-    switch (abi_kind) {
-    case __cxxabiv1::pre:             return std::contracts::assertion_kind::pre;
-    case __cxxabiv1::post:            return std::contracts::assertion_kind::post;
-    case __cxxabiv1::contract_assert: return std::contracts::assertion_kind::assert;
-    default:                          return std::contracts::assertion_kind::pre;
-    }
-}
+static void
+__cxa_cv_dispatch(const __cxa_contract_data_block* chain,
+                  uint8_t semantic,
+                  bool is_noexcept)
+{
+    std::contracts::contract_violation cv{chain};
 
-static std::contracts::evaluation_semantic
-translate_semantic(__cxxabiv1::__cxa_evaluation_semantic_t abi_sem) {
-    switch (abi_sem) {
-    case __cxxabiv1::enforced: return std::contracts::evaluation_semantic::enforce;
-    case __cxxabiv1::observed: return std::contracts::evaluation_semantic::observe;
-    default:                   return std::contracts::evaluation_semantic::enforce;
-    }
-}
+    // Local handler dispatch.
+    auto handler_fn = __cxa_find_field_value<__cxa_local_handler_fn_t>(
+        chain, CXA_FIELD_LOCAL_HANDLER, nullptr);
+    auto label_ptr = __cxa_find_field_value<const void*>(
+        chain, CXA_FIELD_LABEL_PTR, nullptr);
 
-static std::contracts::detection_mode
-translate_mode(__cxxabiv1::__cxa_detection_mode_t abi_mode) {
-    switch (abi_mode) {
-    case __cxxabiv1::predicate_false:      return std::contracts::detection_mode::predicate_false;
-    case __cxxabiv1::evaluation_exception: return std::contracts::detection_mode::evaluation_exception;
-    default:                               return std::contracts::detection_mode::predicate_false;
-    }
-}
-
-extern "C"
-void __cxa_contract_violation_entrypoint(void *data) {
-    uint8_t version = *static_cast<uint8_t*>(data);
-
-    if (version < 1) {
-        fprintf(stderr, "fatal: unknown contract violation data version %u\n", version);
-        std::abort();
-    }
-
-    // For version >= 1, the first fields are always the v1 layout
-    auto *v1 = static_cast<__cxxabiv1::contract_violation_data_v1*>(data);
-
-    // Walk the descriptor table to extract static fields
-    auto *desc = v1->static_descriptor;
-    auto *sdata = static_cast<const char*>(v1->static_data);
-    auto *data_array = desc->data();
-
-    const __cxxabiv1::__cxa_source_location *loc = nullptr;
-    const char *source_text = nullptr;
-    __cxxabiv1::__cxa_assertion_kind_t kind = __cxxabiv1::unspecified;
-
-    for (uint8_t i = 0; i < desc->num_entries; ++i) {
-        auto offset = data_array[i].offset;
-        switch (desc->field_types[i]) {
-        case __cxxabiv1::__cxa_field_source_location:
-            loc = reinterpret_cast<const __cxxabiv1::__cxa_source_location*>(sdata + offset);
-            break;
-        case __cxxabiv1::__cxa_field_source_text:
-            source_text = *reinterpret_cast<const char* const*>(sdata + offset);
-            break;
-        case __cxxabiv1::__cxa_field_assertion_kind:
-            kind = *reinterpret_cast<const __cxxabiv1::__cxa_assertion_kind_t*>(sdata + offset);
-            break;
-        default:
-            break;  // ignore unknown fields
+    auto do_dispatch = [&]()
+    {
+        if (handler_fn)
+        {
+            int result = handler_fn(label_ptr, &cv);
+            if (result == 1)
+                return;
         }
+
+        ::handle_contract_violation(cv);
+    };
+
+    if (is_noexcept)
+    {
+        try { do_dispatch(); }
+        catch (...) { std::abort(); }
     }
+    else
+        do_dispatch();
 
-    // Construct std::contracts::contract_violation
-    std::contracts::contract_violation cv;
-
-    // __cxa_source_location has the same layout as source_location::__impl,
-    // so we can create a source_location that points directly into the
-    // compiler-emitted static data.
-    if (loc) {
-        cv.loc_ = std::source_location::__create_from_pointer(loc);
-    }
-    cv.comment_ = source_text;
-    cv.kind_ = translate_kind(kind);
-    cv.detection_mode_ = translate_mode(v1->mode);
-    cv.semantic_ = translate_semantic(v1->semantic);
-
-    handle_contract_violation(cv);
-
-    // If the semantic is terminating, abort after the handler returns
-    if (cv.is_terminating()) {
+    // Post-handler action.
+    if (semantic == CXA_ES_ENFORCE)
         std::abort();
-    }
 }
+
+// Helper: build an override block on the stack and dispatch.
+static void
+__dispatch_with_override(void* data,
+                         uint8_t kind,
+                         uint8_t semantic,
+                         uint8_t mode,
+                         bool is_noexcept)
+{
+    __override_block_t ovr;
+    ovr.descriptor =
+        reinterpret_cast<const __cxa_descriptor_table_t*>(&__override_desc);
+    ovr.next = static_cast<const __cxa_contract_data_block*>(data);
+    ovr.kind = kind;
+    ovr.semantic = semantic;
+    ovr.mode = mode;
+    __cxa_cv_dispatch(
+        reinterpret_cast<const __cxa_contract_data_block*>(&ovr),
+        semantic, is_noexcept);
+}
+
+// =====================================================================
+// Entry points (extern "C", specification S4)
+// =====================================================================
+
+// Universal entry points.
+extern "C" void
+__cxa_contract_violation(void* data)
+{
+    auto* chain = static_cast<const __cxa_contract_data_block*>(data);
+    uint8_t sem = __cxa_find_field_value<uint8_t>(
+        chain, CXA_FIELD_EVALUATION_SEMANTIC, CXA_ES_UNSPECIFIED);
+    __cxa_cv_dispatch(chain, sem, false);
+}
+
+extern "C" void
+__cxa_contract_violation_noexcept(void* data) noexcept
+{
+    auto* chain = static_cast<const __cxa_contract_data_block*>(data);
+    uint8_t sem = __cxa_find_field_value<uint8_t>(
+        chain, CXA_FIELD_EVALUATION_SEMANTIC, CXA_ES_UNSPECIFIED);
+    __cxa_cv_dispatch(chain, sem, true);
+}
+
+// Specialized: observe (returns after handler).
+#define CXA_OBSERVE(kind_name, kind_val, mode_name, mode_val)           \
+extern "C" void                                                         \
+__cxa_contract_violation_##kind_name##_observe_##mode_name(void* data)   \
+{                                                                       \
+    __dispatch_with_override(                                           \
+        data, kind_val, CXA_ES_OBSERVE, mode_val, false);              \
+}                                                                       \
+extern "C" void                                                         \
+__cxa_contract_violation_##kind_name##_observe_##mode_name##_noexcept(   \
+    void* data) noexcept                                                \
+{                                                                       \
+    __dispatch_with_override(                                           \
+        data, kind_val, CXA_ES_OBSERVE, mode_val, true);               \
+}
+
+CXA_OBSERVE(pre,          CXA_AK_PRE,          pf, CXA_DM_PREDICATE_FALSE)
+CXA_OBSERVE(pre,          CXA_AK_PRE,          ex, CXA_DM_EVALUATION_EXCEPTION)
+CXA_OBSERVE(post,         CXA_AK_POST,         pf, CXA_DM_PREDICATE_FALSE)
+CXA_OBSERVE(post,         CXA_AK_POST,         ex, CXA_DM_EVALUATION_EXCEPTION)
+CXA_OBSERVE(assert,       CXA_AK_ASSERT,       pf, CXA_DM_PREDICATE_FALSE)
+CXA_OBSERVE(assert,       CXA_AK_ASSERT,       ex, CXA_DM_EVALUATION_EXCEPTION)
+CXA_OBSERVE(post_capture, CXA_AK_POST_CAPTURE, pf, CXA_DM_PREDICATE_FALSE)
+CXA_OBSERVE(post_capture, CXA_AK_POST_CAPTURE, ex, CXA_DM_EVALUATION_EXCEPTION)
+
+#undef CXA_OBSERVE
+
+// Specialized: enforce ([[noreturn]]).
+#define CXA_ENFORCE(kind_name, kind_val, mode_name, mode_val)           \
+extern "C" [[noreturn]] void                                            \
+__cxa_contract_violation_##kind_name##_enforce_##mode_name(void* data)   \
+{                                                                       \
+    __dispatch_with_override(                                           \
+        data, kind_val, CXA_ES_ENFORCE, mode_val, false);              \
+    __builtin_unreachable();                                            \
+}                                                                       \
+extern "C" [[noreturn]] void                                            \
+__cxa_contract_violation_##kind_name##_enforce_##mode_name##_noexcept(   \
+    void* data) noexcept                                                \
+{                                                                       \
+    __dispatch_with_override(                                           \
+        data, kind_val, CXA_ES_ENFORCE, mode_val, true);               \
+    __builtin_unreachable();                                            \
+}
+
+CXA_ENFORCE(pre,          CXA_AK_PRE,          pf, CXA_DM_PREDICATE_FALSE)
+CXA_ENFORCE(pre,          CXA_AK_PRE,          ex, CXA_DM_EVALUATION_EXCEPTION)
+CXA_ENFORCE(post,         CXA_AK_POST,         pf, CXA_DM_PREDICATE_FALSE)
+CXA_ENFORCE(post,         CXA_AK_POST,         ex, CXA_DM_EVALUATION_EXCEPTION)
+CXA_ENFORCE(assert,       CXA_AK_ASSERT,       pf, CXA_DM_PREDICATE_FALSE)
+CXA_ENFORCE(assert,       CXA_AK_ASSERT,       ex, CXA_DM_EVALUATION_EXCEPTION)
+CXA_ENFORCE(post_capture, CXA_AK_POST_CAPTURE, pf, CXA_DM_PREDICATE_FALSE)
+CXA_ENFORCE(post_capture, CXA_AK_POST_CAPTURE, ex, CXA_DM_EVALUATION_EXCEPTION)
+
+#undef CXA_ENFORCE
