@@ -275,4 +275,15 @@ void __cxa_contract_violation_post_capture_observe_ex_noexcept(void* data) noexc
 
 } // extern "C"
 
+// Assert integration entry point (P3290, specification S4.6).
+// Shared by libstdc++ and libc++: the <cassert> `assert` macro expands to a
+// call to this single symbol.  It reports assertion_kind=CXA_AK_CASSERT and
+// detection_mode=CXA_DM_PREDICATE_FALSE and terminates via std::abort() on
+// any completion of the handler (normal return or an escaping exception).
+// extern "C++" because of the std::source_location parameter.
+namespace std { class source_location; }
+extern "C++" [[noreturn]] void
+__cxa_handle_cassert_violation(const char* comment,
+                              std::source_location loc) noexcept;
+
 #endif // CONTRACTS_ABI_H

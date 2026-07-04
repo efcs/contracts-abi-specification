@@ -46,8 +46,8 @@ The contract violation entry points have the following responsibilities:
 * Otherwise, call the user-replaceable global handler
   ``::handle_contract_violation``, or the default handler if no replacement
   is provided.
-* If the evaluation semantic is ``enforce``, terminate the program after
-  the handler returns.
+* If the evaluation semantic is ``enforce``, terminate the program (via
+  ``std::abort()``) after the handler returns.
 
 2.2 Design Goals
 ----------------
@@ -171,9 +171,9 @@ predicate evaluation point.
     };
 
 Identifies the evaluation semantic of the contract assertion.
-``CXA_ES_ENFORCE`` indicates the program shall terminate after the
-violation handler returns.  ``CXA_ES_OBSERVE`` indicates execution
-continues.  ``CXA_ES_IGNORE`` indicates the contract is not checked (no
+``CXA_ES_ENFORCE`` indicates the program shall terminate (via
+``std::abort()``) after the violation handler returns.  ``CXA_ES_OBSERVE``
+indicates execution continues.  ``CXA_ES_IGNORE`` indicates the contract is not checked (no
 entry point is called).  ``CXA_ES_QUICK_ENFORCE`` emits a trap
 directly---no entry point, no data, no handler.
 
@@ -373,7 +373,8 @@ points.
    * - ``__cxa_contract_violation_{kind}_observe_ex_noexcept``
      - ``noexcept``
 
-**Enforce entry points** (always terminate):
+**Enforce entry points** (terminate via ``std::abort()`` on handler return;
+``std::terminate()`` if a handler throws at a ``_noexcept`` variant):
 
 .. list-table::
    :header-rows: 1
@@ -469,6 +470,47 @@ way it would be done for the global ``operator new`` and
 ``operator delete``."  Users define their handler with the matching
 signature and it overrides at link time.  No special compiler treatment
 or thunking is needed.
+
+4.6 Assert Integration Entry Point
+-----------------------------------
+
+The C ``assert`` macro integration (p3290) is expanded by the library
+``<cassert>`` header, not by the compiler, so it does not use the
+``void*``-data entry points of |S| 4.1--4.2.  Instead the macro expands to a
+call to a single shared entry point:
+
+.. code-block:: cpp
+
+    extern "C++" [[noreturn]] void
+    __cxa_handle_cassert_violation(
+        const char* comment,
+        std::source_location loc = std::source_location::current()) noexcept;
+
+Both libstdc++ and libc++ expand ``assert(EXPR)`` (when ``NDEBUG`` is not
+defined and ``ASSERT_USES_CONTRACTS`` is defined) to a call to this symbol,
+so a single implementation is shared across standard libraries.  The default
+argument captures the ``source_location`` at the macro-expansion site.  The
+entry point:
+
+1. Constructs a data block reporting ``assertion_kind = CXA_AK_CASSERT``,
+   ``evaluation_semantic = CXA_ES_ENFORCE``, and
+   ``detection_mode = CXA_DM_PREDICATE_FALSE``, with ``comment`` set to the
+   stringized macro argument.
+
+2. Invokes the contract-violation handler via the universal entry point.
+
+3. Terminates via ``std::abort()`` on **any** completion of the handler---a
+   normal return (through the enforce post-action) *or* an escaping
+   exception.  To achieve the latter, the entry point wraps the handler
+   dispatch in ``try { ... } catch (...) { std::abort(); }``.  This differs
+   from the general ``_noexcept`` entry points (|S| 6.1), where a throwing
+   handler calls ``std::terminate()``: the assert integration always
+   ``abort()``s, preserving classic ``assert()`` termination semantics
+   irrespective of how the handler exits.
+
+This is a library entry point (``extern "C++"``, taking ``comment`` and
+``source_location``); it is distinct from, and additional to, the 34
+compiler-facing data-block entry points of |S| 4.1--4.2.
 
 5. Data Format
 ===============
@@ -730,11 +772,19 @@ All entry points share a common dispatch flow:
        - Otherwise, call invoke_default_contract_violation_handler(cv).
 
     4. Post-handler action:
-       - If semantic == enforce: call std::terminate().
+       - If semantic == enforce: call std::abort().
        - If semantic == observe: return to caller.
 
+An enforced violation whose handler returns normally is terminated with
+``std::abort()`` rather than ``std::terminate()``.  ``abort()`` is not
+affected by a user-installed ``std::terminate`` handler, giving predictable,
+uniform contract-termination regardless of program state.
+
 For ``_noexcept`` entry point variants, steps 2-3 are wrapped in a
-noexcept barrier.  If any handler throws, ``std::terminate()`` is called.
+noexcept barrier.  If a handler exits via an exception, ``std::terminate()``
+is called (with the exception still active, so that a ``std::terminate``
+handler can inspect it).  This is the one contract-termination path that
+uses ``std::terminate()`` rather than ``std::abort()``.
 
 For non-noexcept variants, exceptions from handlers propagate normally.
 ``[[noreturn]]`` on enforce variants is still correct: the function

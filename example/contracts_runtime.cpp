@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <exception>
 
 using namespace __cxxabiv1;
 
@@ -296,13 +297,17 @@ __cxa_cv_dispatch(const __cxa_contract_data_block* chain,
 
     if (is_noexcept)
     {
+        // A handler that throws at a noexcept entry point terminates via
+        // std::terminate() (the exception is still active).
         try { do_dispatch(); }
-        catch (...) { std::abort(); }
+        catch (...) { std::terminate(); }
     }
     else
         do_dispatch();
 
-    // Post-handler action.
+    // Post-handler action: an enforced violation whose handler returns
+    // normally is terminated via std::abort() (not std::terminate()), so a
+    // user-installed std::terminate handler cannot alter contract-termination.
     if (semantic == CXA_ES_ENFORCE)
         std::abort();
 }
