@@ -1100,3 +1100,287 @@ runtime handles both via the generic field walk.  The weak
 standard library is linked).  ``contract_violation`` accessors are from
 whichever standard library is linked but implement the same chain-walking
 algorithm.
+
+8. Runtime Library Packaging and Symbol Ownership
+=================================================
+
+The wire format (|S| 3--6) says nothing about *which library* provides each
+runtime symbol.  This section specifies that packaging, because it is what
+makes cross-compiler and cross-language interoperability work in practice:
+which symbols are shared, which are per-standard-library, and how a mixed
+program links without duplicate or missing definitions.
+
+8.1 Two-Tier Library Model
+--------------------------
+
+The runtime is partitioned into two tiers, split along the C/C++ boundary:
+
+**Tier 1 --- the core library (**``libcontracts``**).**
+A **pure-C** library whose only external dependency is the C library
+(``libc``).  It contains everything that can be implemented without a C++
+runtime: chain walking, the dispatch core, the non-``noexcept`` entry
+points, the C accessor functions, and the C contract-check helpers.  It is
+the **only** contracts library that a pure-C translation unit needs, and the
+**only** contracts library that ever legitimately appears on a link line
+shared between two toolchains.
+
+**Tier 2 --- the C++ runtime tier.**
+The C++-only symbols, provided by each C++ standard library (libstdc++ /
+libc++, or their experimental component while the feature is experimental).
+It contains everything that requires C++: the ``std::contracts::
+contract_violation`` member functions, the diagnostic default handler, the
+P3290 C++ API, the assert-integration entry point (|S| 4.6), and the
+``noexcept`` entry-point variants (which need a C++ exception-handling
+barrier to call ``std::terminate()``).
+
+A program uses exactly one Tier 2 implementation (you never link both
+libstdc++ and libc++), and both Tier 2 implementations export the **same
+ABI symbol names**, so an object file compiled by one toolchain resolves its
+Tier 2 references against whichever standard library the final program links.
+
+The tier boundary is the same on every toolchain; only Tier 1's membership
+is a shared, cross-toolchain contract.
+
+8.2 The Core Library (``libcontracts``)
+----------------------------------------
+
+``libcontracts`` is a single **interchangeable** library across toolchains:
+
+* SONAME ``libcontracts.so.1``.
+* Version node ``LIBCONTRACTS_1.0``.
+* Depends only on ``libc``.
+* Exports exactly the symbol set below; a build that exports more or fewer
+  symbols under ``LIBCONTRACTS_1.0`` is non-conforming.
+
+Because the SONAME, version node, and exported set are fixed here, a system
+may carry a single ``libcontracts`` (e.g. a distribution package) that both
+compilers' implicit ``-lcontracts`` resolve against; each toolchain's own
+build is an ABI-identical fallback.  The two implementations are maintained
+independently (|S| 8.6); this specification --- not shared source --- is the
+authority that keeps them compatible.
+
+**Membership rule.** A symbol belongs to Tier 1 if and only if it is
+implementable in standard C with no dependency beyond ``libc`` and requires
+no C++ exception handling.
+
+**Exported symbols** (``LIBCONTRACTS_1.0``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Symbol(s)
+     - Role
+   * - ``__cxa_find_field``
+     - Chain-walking field lookup (|S| 5.4).
+   * - ``__cxa_contract_violation``
+     - Universal (non-``noexcept``) entry point (|S| 4.1).
+   * - ``__cxa_contract_violation_{kind}_{observe,enforce}_{pf,ex}``
+     - All **non-**\ ``noexcept`` specialized entry points (|S| 4.2).
+   * - ``__contract_dispatch_core``, ``__dispatch_with_override_core``
+     - Non-terminating dispatch primitives; called by the Tier 2
+       ``noexcept`` wrappers (|S| 8.4).
+   * - ``stdc_contract_violation_*``
+     - C accessor functions (comment, file, function, line, column, kind,
+       semantic, detection_mode, is_terminating).
+   * - ``stdc_handle_{enforced,observed,quick_enforced}_contract_violation_explicit``
+     - P3290 C API.
+   * - ``__c_contract_check_{enforce,observe}``
+     - Compiler-emitted C contract-check helpers.
+
+**Weak references (declared, not defined, by** ``libcontracts`` **):**
+
+* ``__handle_contract_violation`` --- the C-linkage (optionally-replaced)
+  global handler (|S| 8.4).
+* ``__contract_invoke_default_handler`` --- the C-linkage entry to the
+  *default* handler, used by the dispatch fallback (|S| 8.4).
+* No other undefined references beyond ``libc``.
+
+8.3 The C++ Runtime Tier
+-------------------------
+
+Provided by each C++ standard library.  While contracts remain an
+experimental feature in a toolchain, these symbols may live in that
+toolchain's experimental library component (e.g. ``libstdc++exp``); when the
+feature becomes non-experimental they may move into the primary C++ runtime.
+Either placement is conforming, because a program links exactly one C++
+runtime and these symbols carry the same ABI names regardless of which
+library object hosts them.
+
+**Membership rule.** A symbol belongs to Tier 2 if it names a C++ type in
+its signature, provides a C++-language facility, or requires a C++
+exception-handling barrier.
+
+**Symbols provided by every conforming C++ runtime** (same ABI names in
+libstdc++ and libc++):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Symbol(s)
+     - Role
+   * - ``__cxa_contract_violation_noexcept`` and all
+       ``__cxa_contract_violation_..._noexcept`` variants
+     - The ``noexcept`` entry points (|S| 4.1--4.2).  Each wraps a Tier 1
+       dispatch primitive in ``try { ... } catch (...) { std::terminate(); }``
+       (|S| 8.4); this is why they cannot live in the pure-C Tier 1.
+   * - ``std::contracts::contract_violation`` member functions
+       (``_ZNKSt9contracts18contract_violation*``)
+     - Accessors used by C++ handlers (|S| 6.4).
+   * - ``std::contracts::invoke_default_contract_violation_handler``
+     - Standard C++ API (P2900): invokes the diagnostic **default** handler,
+       regardless of any replacement (|S| 8.4).  Callable by a user's custom
+       handler to emit the default diagnostics.
+   * - ``__contract_invoke_default_handler`` (C-linkage)
+     - C-linkage form of the above: same always-default behavior, callable
+       from C (a C violation handler, or the Tier 1 dispatch fallback).
+   * - ``handle_contract_violation`` (weak default)
+     - Implementation default of the replaceable global handler; a user
+       definition overrides it (|S| 8.4).
+   * - ``__cxa_handle_cassert_violation``
+     - Assert-integration entry point (|S| 4.6).
+   * - P3290 C++ API
+       (``handle_{enforced,observed,quick_enforced}_contract_violation``
+       and their ``nothrow_t`` overloads)
+     - The C++ manual-violation API (|S| 6.5).
+
+8.4 Handler Resolution Across Tiers
+------------------------------------
+
+Two distinct handler concepts must both be reachable, and the two-tier model
+keeps them as separate symbols:
+
+**The (optionally-replaced) global handler.**
+Named by the C-linkage symbol ``__handle_contract_violation``.  It is what
+the dispatch invokes for a violation.  A user who defines
+``handle_contract_violation`` with the required signature causes the compiler
+to emit ``__handle_contract_violation`` as a **strong** C-linkage alias (same
+address, zero overhead).  Absent a user definition, the symbol is undefined
+and the dispatch falls through to the default (below).  Using the C-linkage
+alias makes this the single cross-language, cross-toolchain handler entry: a
+handler written in C or C++, compiled by either toolchain, is reached
+identically.
+
+**The default handler.**
+The implementation-provided diagnostic behavior, reachable **regardless of
+any replacement** through two symbols with identical semantics:
+
+* ``std::contracts::invoke_default_contract_violation_handler(const
+  contract_violation&)`` --- the standard C++ API (P2900).  A user's custom
+  handler calls this to emit the default diagnostics in addition to (or
+  instead of) its own behavior.
+* ``__contract_invoke_default_handler(const void*)`` --- the C-linkage form
+  of the same function.  It exists so that pure-C code can reach the default:
+  a C violation handler (D4299) can call it, and ``libcontracts`` uses it for
+  its dispatch fallback.
+
+Neither of these ever dispatches to a user replacement; they always run the
+default.  This is the functionality P2900 requires and must not be collapsed
+into the replaceable global handler.
+
+**Dispatch resolution** in the ``libcontracts`` core (pure C), after the
+local-handler check (|S| 6.1):
+
+.. code-block:: c
+
+    /* In libcontracts (Tier 1): both are weak references. */
+    __attribute__((weak)) void __handle_contract_violation(const void* cv);
+    __attribute__((weak)) void __contract_invoke_default_handler(const void* cv);
+
+    if (&__handle_contract_violation)
+        __handle_contract_violation(cv);          /* user replacement */
+    else if (&__contract_invoke_default_handler)
+        __contract_invoke_default_handler(cv);    /* implementation default (Tier 2) */
+    else
+        __contract_minimal_default(cv);           /* Tier 1 libc-only fallback */
+
+Resolution outcomes:
+
+* **User-provided handler.**  ``__handle_contract_violation`` is defined
+  (strong alias); the dispatch calls it.  The handler may itself call
+  ``invoke_default_contract_violation_handler`` /
+  ``__contract_invoke_default_handler`` to also emit the default diagnostics.
+
+* **No user handler, C++ runtime linked.**  ``__handle_contract_violation``
+  is undefined; ``__contract_invoke_default_handler`` (Tier 2) is defined and
+  runs the default diagnostic handler.
+
+* **No user handler, no C++ runtime (pure C).**  Both weak references are
+  unresolved; ``libcontracts`` calls its own ``libc``-only
+  ``__contract_minimal_default``, which prints a diagnostic to ``stderr`` (in
+  the manner of ``__assert_fail``) and returns.  Termination for enforcing
+  semantics is still performed by the post-handler action in the dispatch
+  core (|S| 6.1), not by the fallback.
+
+The passed pointer is the data-block chain head; a C++ handler (or
+``invoke_default_contract_violation_handler``) receives it as ``const
+contract_violation&`` because ``contract_violation`` **is** the chain pointer
+(|S| 6.4), so the C and C++ signatures are ABI-identical.
+
+The ``noexcept`` entry points (Tier 2) do not re-implement dispatch: they
+call the Tier 1 ``__contract_dispatch_core`` /
+``__dispatch_with_override_core`` primitives inside a C++ ``try { ... }
+catch (...) { std::terminate(); }`` barrier.  This is the only place the
+``noexcept`` barrier of |S| 6.1 is realized, and it is necessarily in the
+C++ tier.
+
+8.5 Implicit Linkage
+--------------------
+
+Conforming toolchains link both tiers automatically from the feature flags,
+so neither C nor C++ contract users need explicit ``-l`` options:
+
+* A C compilation that enables C contracts links ``libcontracts``
+  (Tier 1) automatically.
+* A C++ compilation that enables contracts (or selects the C++26 dialect)
+  links its C++ runtime's contract component (Tier 2) automatically, which
+  in turn brings in ``libcontracts`` (Tier 1).
+
+The relative link order is Tier 2 before Tier 1 (the C++ runtime depends on
+``libcontracts``).
+
+8.6 Independent Implementations
+-------------------------------
+
+``libcontracts`` follows the same source-management model as the rest of the
+Itanium C++ ABI runtime (``libsupc++`` for GCC, ``libc++abi`` for LLVM):
+**two independent implementations conforming to one written specification**,
+not shared source.  The implementations are separately licensed (GCC:
+GPLv3 + Runtime Library Exception; LLVM: Apache-2.0 with LLVM exception),
+which precludes byte-identical source in any case.  This specification is
+the single source of truth; a cross-compiler, cross-language interop test
+suite is the drift detector.
+
+8.7 Symbol-Ownership Invariants
+-------------------------------
+
+The following are added to the invariants of |S| 7.1 (things that can never
+change without an ABI break):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 50 50
+
+   * - Invariant
+     - Reason
+   * - Tier 1 membership (the ``LIBCONTRACTS_1.0`` exported set of |S| 8.2)
+     - It is the shared library on mixed-toolchain link lines; adding or
+       removing a symbol changes what every consumer resolves.
+   * - ``libcontracts`` SONAME ``libcontracts.so.1`` and version node
+       ``LIBCONTRACTS_1.0``
+     - Interchangeability across toolchains depends on identical soname and
+       version node; a bump must be coordinated between all implementations.
+   * - ``__handle_contract_violation`` is the C-linkage (optionally-replaced)
+       global-handler entry point (weak reference in Tier 1; strong alias
+       emitted by the compiler for a user handler)
+     - Cross-language handler resolution depends on this single symbol and
+       its weak/strong discipline.
+   * - The default handler is reachable regardless of replacement via
+       ``invoke_default_contract_violation_handler`` (C++) and
+       ``__contract_invoke_default_handler`` (C-linkage), both always-default
+     - P2900 requires a custom handler to be able to invoke the default
+       diagnostics; C code needs a C-linkage form of the same.
+   * - Tier 2 symbols carry identical ABI names across all C++ runtimes
+     - Objects from one toolchain resolve Tier 2 references against another
+       toolchain's linked standard library.
