@@ -146,6 +146,7 @@ value when a field is absent from the data chain.
         CXA_AK_MANUAL         = 0x04,
         CXA_AK_CASSERT        = 0x05,
         CXA_AK_POST_CAPTURE   = 0x06,
+        CXA_AK_IMPLICIT       = 0x07,
     };
 
 Identifies the kind of contract assertion.  ``CXA_AK_PRE``,
@@ -155,7 +156,9 @@ P3290 manual violation API (``handle_enforced_contract_violation`` and
 ``handle_observed_contract_violation``).  ``CXA_AK_CASSERT`` is reserved
 for C-compatible assertions.  ``CXA_AK_POST_CAPTURE`` distinguishes the
 postcondition capture initialization point from the postcondition
-predicate evaluation point.
+predicate evaluation point.  ``CXA_AK_IMPLICIT`` identifies an implicit
+contract assertion inserted by the implementation to guard a case of
+core-language undefined behaviour (P3100).
 
 3.3.2 ``__cxa_evaluation_semantic_t``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -346,14 +349,14 @@ and detection mode in the function name:
 
 Where:
 
-- **kind**: ``pre``, ``post``, ``assert``, ``post_capture``
+- **kind**: ``pre``, ``post``, ``assert``, ``post_capture``, ``implicit``
 - **semantic**: ``observe``, ``enforce``
 - **mode**: ``pf`` (predicate_false), ``ex`` (evaluation_exception)
 - **_noexcept** suffix: present on the ``noexcept`` variant
 
 Enforce variants are ``[[noreturn]]``.  Each kind/semantic/mode
 combination has both a throwing and a ``noexcept`` variant, yielding
-4 kinds x 2 semantics x 2 modes x 2 noexcept = 32 specialized entry
+5 kinds x 2 semantics x 2 modes x 2 noexcept = 40 specialized entry
 points.
 
 **Observe entry points** (return after handler):
@@ -392,8 +395,8 @@ points.
      - ``[[noreturn]] noexcept``
 
 Where ``{kind}`` is one of ``pre``, ``post``, ``assert``,
-``post_capture``.  Additional kinds can be added by defining new entry
-points without affecting existing ones.
+``post_capture``, ``implicit``.  Additional kinds can be added by defining
+new entry points without affecting existing ones.
 
 ``quick_enforce`` does not use an entry point---the compiler emits a
 trap directly.
