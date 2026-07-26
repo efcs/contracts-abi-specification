@@ -259,6 +259,10 @@ data block.
      - ``CXA_FIELD_EXCEPTION_PTR``
      - ``void*``
      - ``nullptr``
+   * - ``0x0B``
+     - ``CXA_FIELD_REPORT``
+     - ``__cxa_contract_report_populator``
+     - ``nullptr`` (no populator)
 
 Field ``0x02`` (comment) contains the source text of the contract
 predicate.  Field ``0x03`` (message) contains a computed diagnostic
@@ -270,7 +274,19 @@ field ``0x04`` is a type-erased trampoline to the label's
 the label's ``query`` facet, and field ``0x06`` is the address of the
 assertion-control object instance.
 
-IDs ``0x0B`` through ``0x3F`` are reserved for future standard fields.
+Field ``0x0B`` supports a lazily-populated diagnostic report: the value
+at that offset is an ``__cxa_contract_report_populator`` (|S| 3.6)
+pairing a producer-supplied ``populate`` callback with an opaque
+``ctx``.  The runtime calls ``populate(ctx)`` only when
+``contract_violation::report()`` is invoked; if the field is absent,
+``report()`` returns ``nullptr`` without ever calling into a producer.
+This lets a producer such as a sanitizer defer building a (potentially
+expensive) report string until a handler actually asks for it, and skip
+the cost entirely for handlers that never do.  Like other fields,
+first-found-wins resolution (|S| 5.3) applies: only the first
+``CXA_FIELD_REPORT`` found in the chain is used.
+
+IDs ``0x0C`` through ``0x3F`` are reserved for future standard fields.
 
 3.4.2 Extended Fields
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -308,6 +324,33 @@ rather than a byte offset.
 
 Both function pointers are stored as link-time relocations in constant
 data, not filled at runtime.
+
+3.6 Report Populator
+----------------------
+
+.. code-block:: cpp
+
+    // Lazily produces a producer-owned diagnostic string.  The runtime
+    // calls ``populate(ctx)`` at most once per accessor call and does not
+    // cache the result; a producer that wants repeat calls to be cheap
+    // must cache internally (e.g. keyed off ``ctx``).
+    struct __cxa_contract_report_populator {
+        const char* (*populate)(const void* ctx);
+        const void* ctx;
+    };
+
+The returned ``const char*`` is a NUL-terminated string, owned by the
+producer, valid for the lifetime of the contract violation (i.e., at
+least as long as the data block chain referencing it remains live).  The
+runtime never takes ownership of, copies, or frees it.
+
+Unlike the plain function-pointer fields of |S| 3.5, ``CXA_FIELD_REPORT``'s
+value at its offset is this two-word struct, not a bare function pointer,
+so accessors retrieve it with the pointer-to-structured-data helper
+(``__cxa_find_field_ptr``, |S| 5.4) rather than
+``__cxa_find_field_value``.  The ``ctx`` member lets the producer carry
+state (for example, a pointer to a buffer it renders into on first call)
+without resorting to global or thread-local variables.
 
 4. Entry Points
 ================
