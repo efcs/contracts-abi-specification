@@ -14,6 +14,7 @@ Specification
    :maxdepth: 1
 
    specification-proposal
+   code-size-comparison
 
 Background
 ==========
@@ -23,9 +24,4 @@ Background
 
    requirements
    rationale
-
-
-
-
-
-
+   spec_answers_to_open_questions

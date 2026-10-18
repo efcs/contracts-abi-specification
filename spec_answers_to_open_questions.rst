@@ -270,13 +270,13 @@ Summary Table
      - NO. Only one signature supported. No "magic" - it's a straightforward replaceable function.
      - 38, 39, 68, 83
    * - Q6.2: Different STL implementations?
-     - Acknowledged (libc++ with GCC) but NOT solved. Compiler+STL treated as unified platform.
+     - Acknowledged but NOT solved by the standard. **Resolved by the ABI**: ``contract_violation`` is a thin wrapper around the chain pointer; both standard libraries define identical single-pointer layouts and chain-walking accessors.
      - 57
    * - Q3.x: C interoperability?
      - NOT ADDRESSED. Handler must have C++ linkage and take C++ type.
      - 38, 83
    * - Q2.x: Cross-STL compatibility?
-     - NOT ADDRESSED. ``contract_violation`` layout is implementation-defined.
+     - NOT ADDRESSED by the standard. **Resolved by the ABI**: both libstdc++ and libc++ define ``contract_violation`` as a single ``const __cxa_contract_data_block*`` member with chain-walking accessors.
      - 55
 
 Key Implications for Itanium ABI Work
@@ -288,12 +288,17 @@ Based on the specification findings:
 
    - Layout is implementation-defined
    - Each standard library can define its own layout
-   - The Itanium ABI must decide how to handle this
+   - **ABI resolution**: ``contract_violation`` holds a single
+     ``const __cxa_contract_data_block*`` chain pointer.  Both
+     standard libraries use this layout with chain-walking accessors.
 
 2. **The specification does NOT address cross-STL usage**
 
    - Each implementation is expected to provide its own complete stack
-   - The Itanium ABI must decide whether to support or prevent cross-STL mixing
+   - **ABI resolution**: Cross-STL usage works because both libstdc++
+     and libc++ define identical ``contract_violation`` with the same
+     single-pointer layout.  Demonstrated in 6 cross-compilation
+     permutations.
 
 3. **The specification does NOT support C handlers**
 
@@ -303,7 +308,10 @@ Based on the specification findings:
 4. **The handler replacement mechanism is implementation-defined**
 
    - Platforms can choose NOT to support user handlers
-   - The Itanium ABI should define how replacement works on platforms that support it
+   - **ABI resolution**: Weak symbol pattern.  The runtime declares
+     ``handle_contract_violation`` as ``__attribute__((weak))``.  Users
+     define their handler with the same signature and it overrides at
+     link time.  Same mechanism as ``operator new``.
 
 5. **No declaration is provided in standard headers**
 
@@ -316,41 +324,36 @@ Based on the specification findings:
    - No signature detection or thunking needed
    - ABI can assume a single, well-defined signature
 
-Design Freedom for Itanium ABI
-*******************************
+ABI Design Choices Made
+*************************
 
-The specification deliberately leaves many ABI details to implementations, including:
+The specification leaves many ABI details to implementations.  Here are
+the choices made:
 
-.. admonition:: ABI Design Choices
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
 
-   The Itanium ABI specification has freedom to decide:
-
-   1. **Whether to standardize std::contract_violation layout**
-
-      - Pro: Enables cross-STL compatibility
-      - Con: Constrains standard library implementations
-
-   2. **How the compiler calls the handler**
-
-      - Directly (runtime-constructed approach)
-      - Via entrypoint (descriptor approach)
-      - Hybrid approach
-
-   3. **Whether to support cross-compiler/cross-STL usage**
-
-      - Support it (requires standardizing layout)
-      - Prevent it (keep layouts implementation-specific)
-      - Abstract it (descriptor-based indirection)
-
-   4. **Whether replacement is mandatory or optional**
-
-      - Mandatory: All platforms must support user handlers
-      - Optional: Implementation-defined (matches specification)
-
-   5. **C interoperability extensions**
-
-      - Not in the standard, but could be added as an extension
-      - Would require additional ABI surface
+   * - Design Question
+     - Choice
+   * - Standardize ``contract_violation`` layout?
+     - Yes: single chain pointer (``const __cxa_contract_data_block*``).
+       Enables cross-STL compatibility.
+   * - How the compiler calls the handler
+     - Via 34 ABI entry points.  Specialized entry points encode
+       kind/semantic/mode in name; ``[[noreturn]]`` on enforce variants.
+   * - Cross-compiler/cross-STL support?
+     - Fully supported.  Byte-compatible ABI headers in both compilers.
+       Verified with 6 cross-compilation permutations.
+   * - Handler replacement mandatory?
+     - Supported via weak symbols (same as ``operator new``).
+   * - Data format
+     - Linked list of self-describing data blocks with first-found-wins
+       resolution.  Override blocks prepend fields without modifying
+       existing data.
+   * - C interoperability
+     - Not addressed (matches specification).
 
 .. seealso::
    - :ref:`requirements` - Design Requirements
+   - :ref:`rationale` - Design Rationale
